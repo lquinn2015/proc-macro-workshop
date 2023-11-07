@@ -1,8 +1,9 @@
 use proc_macro::TokenStream;
-use quote::quote;
+use proc_macro2::TokenTree;
+use quote::{quote, ToTokens};
 use syn::{parse_macro_input, DeriveInput};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let name = &ast.ident;
@@ -47,6 +48,48 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
+    let extend_methods = fields.iter().filter_map(|f| {
+        let name = f.ident.as_ref().unwrap();
+        for attr in &f.attrs {
+            let path = attr.path();
+            let mut tts = attr.meta.clone().into_token_stream().into_iter();
+            tts.next();
+            eprintln!("Attribute found:  {:#?}", attr);
+            eprintln!("Attribute tts: {:#?}", tts);
+            if path.segments.len() == 1 && path.segments[0].ident == "builder" {
+                if let Some(TokenTree::Group(g)) = tts.clone().into_iter().next() {
+                    let mut tokens = g.stream().into_iter();
+                    eprintln!("tokens: {:#?}", tokens);
+                    match tokens.next().unwrap() {
+                        TokenTree::Ident(ref i) => assert_eq!(i, "each"),
+                        tt => panic!("Invalid token, expected 'each' found {}", tt),
+                    }
+                    match tokens.next().unwrap() {
+                        TokenTree::Punct(ref p) => assert_eq!(p.as_char(), '='),
+                        tt => panic!("Invalid token, expected 'each' found {}", tt),
+                    }
+                    let arg = match tokens.next().unwrap() {
+                        TokenTree::Literal(l) => l,
+                        tt => panic!("expected string found, {}", tt),
+                    };
+                    match syn::Lit::new(arg) {
+                        syn::Lit::Str(s) => {
+                            let arg = syn::Ident::new(&s.value(), s.span());
+                            let inner_ty = ty_inner_type("Vec", &f.ty).unwrap();
+                            return Some(quote! {
+                                pub fn #arg(&mut self, #arg: #inner_ty) -> &mut Self {
+                                    self.#name.push(#arg);
+                                }
+                            });
+                        }
+                        _ => panic!("Not a valid string"),
+                    }
+                }
+            }
+        }
+        None
+    });
+
     let builder_methods = fields.iter().map(|f| {
         let name = &f.ident;
         let ty = &f.ty;
@@ -76,6 +119,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #bident {
             #(#builder_methods)*
+            #(#extend_methods)*
 
 
             fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
