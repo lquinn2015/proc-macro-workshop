@@ -25,6 +25,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let ty = &f.ty;
         if ty_inner_type("Option", ty).is_some() {
             quote! { #name: #ty}
+        } else if builder_of(f).is_some() {
+            quote! { #name: #ty }
         } else {
             quote! { #name: std::option::Option<#ty>}
         }
@@ -32,81 +34,50 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let builder_fields_empty = fields.iter().map(|f| {
         let name = &f.ident;
-        quote! { #name: None }
+        if builder_of(&f).is_some() {
+            quote! { #name: Vec::new() }
+        } else {
+            quote! { #name: None }
+        }
     });
 
     let build_func_decl = fields.iter().map(|f| {
         let name = &f.ident;
-        if ty_inner_type("Option", &f.ty).is_some() {
-            let expr = quote! {
-                #name: self.#name.clone()
-            };
-            return expr;
-        }
-        quote! {
-            #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))?
+        if ty_inner_type("Option", &f.ty).is_some() || builder_of(&f).is_some() {
+            quote! { #name: self.#name.clone() }
+        } else {
+            quote! { #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))? }
         }
     });
 
-    let extend_methods = fields.iter().filter_map(|f| {
-        let name = f.ident.as_ref().unwrap();
-        for attr in &f.attrs {
-            let path = attr.path();
-            let mut tts = attr.meta.clone().into_token_stream().into_iter();
-            tts.next();
-            eprintln!("Attribute found:  {:#?}", attr);
-            eprintln!("Attribute tts: {:#?}", tts);
-            if path.segments.len() == 1 && path.segments[0].ident == "builder" {
-                if let Some(TokenTree::Group(g)) = tts.clone().into_iter().next() {
-                    let mut tokens = g.stream().into_iter();
-                    eprintln!("tokens: {:#?}", tokens);
-                    match tokens.next().unwrap() {
-                        TokenTree::Ident(ref i) => assert_eq!(i, "each"),
-                        tt => panic!("Invalid token, expected 'each' found {}", tt),
-                    }
-                    match tokens.next().unwrap() {
-                        TokenTree::Punct(ref p) => assert_eq!(p.as_char(), '='),
-                        tt => panic!("Invalid token, expected 'each' found {}", tt),
-                    }
-                    let arg = match tokens.next().unwrap() {
-                        TokenTree::Literal(l) => l,
-                        tt => panic!("expected string found, {}", tt),
-                    };
-                    match syn::Lit::new(arg) {
-                        syn::Lit::Str(s) => {
-                            let arg = syn::Ident::new(&s.value(), s.span());
-                            let inner_ty = ty_inner_type("Vec", &f.ty).unwrap();
-                            return Some(quote! {
-                                pub fn #arg(&mut self, #arg: #inner_ty) -> &mut Self {
-                                    self.#name.push(#arg);
-                                }
-                            });
-                        }
-                        _ => panic!("Not a valid string"),
-                    }
-                }
-            }
-        }
-        None
-    });
-
-    let builder_methods = fields.iter().map(|f| {
+    let methods = fields.iter().map(|f| {
         let name = &f.ident;
         let ty = &f.ty;
 
-        if let Some(inner_ty) = ty_inner_type("Option", ty) {
-            quote! {
-                pub fn #name(&mut self, #name: #inner_ty) -> &mut Self {
-                    self.#name = Some(#name);
-                    self
-                }
-            }
+        let (arg_type, value) = if let Some(inner_ty) = ty_inner_type("Option", ty) {
+            (inner_ty, quote! { std::option::Option::Some(#name) })
+        } else if builder_of(&f).is_some() {
+            (ty, quote! {#name})
         } else {
-            quote! {
-                pub fn #name(&mut self, #name: #ty) -> &mut Self {
-                    self.#name = Some(#name);
+            (ty, quote! { std::option::Option::Some(#name) })
+        };
+
+        let set_method = quote! {
+                pub fn #name(&mut self, #name: #arg_type) -> &mut Self {
+                    self.#name = #value;
                     self
                 }
+        };
+
+        match extend_methods(&f) {
+            None => set_method,
+            Some((true, extension)) => extension,
+            Some((false, extension)) => {
+                let expr = quote! {
+                    #set_method
+                    #extension
+                };
+                expr.into()
             }
         }
     });
@@ -118,8 +89,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl #bident {
-            #(#builder_methods)*
-            #(#extend_methods)*
+            #(#methods)*
+            //#(#extend_methods)*
 
 
             fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
@@ -140,6 +111,56 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+fn builder_of(f: &syn::Field) -> Option<proc_macro2::Group> {
+    for attr in &f.attrs {
+        let path = attr.path();
+        if path.is_ident("builder") {
+            let mut g = attr.meta.clone().into_token_stream().into_iter();
+            g.next();
+            if let TokenTree::Group(g) = g.next()? {
+                return Some(g);
+            }
+        }
+    }
+    None
+}
+
+fn extend_methods(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
+    let name = f.ident.as_ref().unwrap();
+    let g = builder_of(f)?;
+
+    //eprintln!("Attribute found:  {:#?}", g);
+
+    let mut tokens = g.stream().into_iter();
+    //eprintln!("tokens: {:#?}", tokens);
+    match tokens.next().unwrap() {
+        TokenTree::Ident(ref i) => assert_eq!(i, "each"),
+        tt => panic!("Invalid token, expected 'each' found {}", tt),
+    }
+    match tokens.next().unwrap() {
+        TokenTree::Punct(ref p) => assert_eq!(p.as_char(), '='),
+        tt => panic!("Invalid token, expected 'each' found {}", tt),
+    }
+    let arg = match tokens.next().unwrap() {
+        TokenTree::Literal(l) => l,
+        tt => panic!("expected string found, {}", tt),
+    };
+    match syn::Lit::new(arg) {
+        syn::Lit::Str(s) => {
+            let arg = syn::Ident::new(&s.value(), s.span());
+            let inner_ty = ty_inner_type("Vec", &f.ty).unwrap();
+            let method = quote! {
+                pub fn #arg(&mut self, #arg: #inner_ty) -> &mut Self {
+                    self.#name.push(#arg);
+                    self
+                }
+            };
+            return Some((&arg == name, method));
+        }
+        _ => panic!("Not a valid string"),
+    }
 }
 
 fn ty_inner_type<'a>(wrapper: &str, ty: &'a syn::Type) -> Option<&'a syn::Type> {
