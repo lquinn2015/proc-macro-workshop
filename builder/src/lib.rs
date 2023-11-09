@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenTree;
 use quote::{quote, ToTokens};
-use syn::{parse_macro_input, DeriveInput};
+use syn::{parse_macro_input, spanned::Spanned, DeriveInput};
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -136,7 +136,15 @@ fn extend_methods(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
     let mut tokens = g.stream().into_iter();
     //eprintln!("tokens: {:#?}", tokens);
     match tokens.next().unwrap() {
-        TokenTree::Ident(ref i) => assert_eq!(i, "each"),
+        TokenTree::Ident(ref i) => {
+            if i != "each" {
+                return Some((
+                    false,
+                    syn::Error::new(f.attrs[0].meta.span(), "expected `builder(each = \"...\")`")
+                        .to_compile_error(),
+                ));
+            }
+        }
         tt => panic!("Invalid token, expected 'each' found {}", tt),
     }
     match tokens.next().unwrap() {
