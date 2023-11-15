@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenTree;
 use quote::{quote, ToTokens};
-use syn::{parse_macro_input, punctuated::Punctuated, spanned::Spanned, Attribute, DeriveInput};
+use syn::{parse_macro_input, punctuated::Punctuated, Attribute, DeriveInput};
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -19,7 +19,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     } else {
         unimplemented!()
     };
-
     let builder_fields = fields.iter().map(|f| {
         let name = &f.ident;
         let ty = &f.ty;
@@ -36,9 +35,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let name = &f.ident;
         let is_builder = builder_of(&f);
         if is_builder.is_some() {
-            quote! { #name: Vec::new() }
+            quote! { #name: std::vec::Vec::new() }
         } else {
-            quote! { #name: None }
+            quote! { #name: std::option::Option::None }
         }
     });
 
@@ -94,8 +93,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             //#(#extend_methods)*
 
 
-            fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
-                Ok(#name {
+            fn build(&mut self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(#name {
                     #(#build_func_decl,)*
                 })
             }
@@ -118,15 +117,17 @@ fn builder_of(f: &syn::Field) -> Option<&Attribute> {
     for attr in &f.attrs {
         let path = attr.path();
         if path.is_ident("builder") {
-            return Some(attr); /*
-                               let mut g = attr.meta.clone().into_token_stream().into_iter();
-                               g.next();
-                               if let TokenTree::Group(g) = g.next()? {
-                                   return Some(g);
-                               }*/
+            return Some(attr);
         }
     }
     None
+}
+
+fn mk_err<T: quote::ToTokens>(t: T) -> Option<(bool, proc_macro2::TokenStream)> {
+    Some((
+        false,
+        syn::Error::new_spanned(t, "expected `builder(each = \"...\")`").to_compile_error(),
+    ))
 }
 
 fn extend_methods(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
@@ -136,25 +137,22 @@ fn extend_methods(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
         .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
         .ok()?;
 
-    let syn_error =
-        syn::Error::new(g.meta.span(), "expected `builder(each = \"...\")`").to_compile_error();
-
     let meta = match &nvs[0] {
         syn::Meta::NameValue(nv) => {
             if !nv.path.is_ident("each") {
-                return Some((false, syn_error));
+                return mk_err(&g.meta);
             }
             nv
         }
         _ => {
-            return Some((false, syn_error));
+            return mk_err(&g.meta);
         }
     };
 
     let val = match meta.value.clone().into_token_stream().into_iter().next() {
         Some(TokenTree::Literal(l)) => l,
         _ => {
-            return Some((false, syn_error));
+            return mk_err(&g);
         }
     };
     match syn::Lit::new(val) {
@@ -167,49 +165,10 @@ fn extend_methods(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
                     self
                 }
             };
-            return Some((&arg == name, method));
+            Some((&arg == name, method))
         }
-        _ => {}
+        _a => mk_err(_a),
     }
-    return Some((false, syn_error));
-
-    /*
-    let mut tokens = g.stream().into_iter();
-    //eprintln!("tokens: {:#?}", tokens);
-    match tokens.next().unwrap() {
-        TokenTree::Ident(ref i) => {
-            if i != "each" {
-                return Some((
-                    false,
-                    syn::Error::new(f.attrs[0].meta.span(), "expected `builder(each = \"...\")`")
-                        .to_compile_error(),
-                ));
-            }
-        }
-        tt => panic!("Invalid token, expected 'each' found {}", tt),
-    }
-    match tokens.next().unwrap() {
-        TokenTree::Punct(ref p) => assert_eq!(p.as_char(), '='),
-        tt => panic!("Invalid token, expected 'each' found {}", tt),
-    }
-    let arg = match tokens.next().unwrap() {
-        TokenTree::Literal(l) => l,
-        tt => panic!("expected string found, {}", tt),
-    };
-    match syn::Lit::new(arg) {
-        syn::Lit::Str(s) => {
-            let arg = syn::Ident::new(&s.value(), s.span());
-            let inner_ty = ty_inner_type("Vec", &f.ty).unwrap();
-            let method = quote! {
-                pub fn #arg(&mut self, #arg: #inner_ty) -> &mut Self {
-                    self.#name.push(#arg);
-                    self
-                }
-            };
-            return Some((&arg == name, method));
-        }
-        _ => panic!("Not a valid string"),
-    }*/
 }
 
 fn ty_inner_type<'a>(wrapper: &str, ty: &'a syn::Type) -> Option<&'a syn::Type> {
