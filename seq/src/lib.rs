@@ -1,5 +1,4 @@
 use proc_macro::TokenStream;
-use quote::ToTokens;
 use syn::parse::Parse;
 use syn::{parse_macro_input, Token};
 
@@ -16,7 +15,12 @@ impl Parse for SeqMacroInput {
         let ident = syn::Ident::parse(input)?;
         let _tin: Token![in] = input.parse()?;
         let from = syn::LitInt::parse(input)?;
-        let _dots: Token![..] = input.parse()?;
+        let inclusive = input.peek(Token![..=]);
+        if inclusive {
+            let _idot: Token![..=] = input.parse()?;
+        } else {
+            let _dots: Token![..] = input.parse()?;
+        }
         let to = syn::LitInt::parse(input)?;
 
         let content;
@@ -24,7 +28,10 @@ impl Parse for SeqMacroInput {
         let tt = proc_macro2::TokenStream::parse(&content)?;
 
         let from = from.base10_parse::<usize>()?;
-        let to = to.base10_parse::<usize>()?;
+        let mut to = to.base10_parse::<usize>()?;
+        if inclusive {
+            to += 1;
+        }
 
         Ok(SeqMacroInput {
             from,
